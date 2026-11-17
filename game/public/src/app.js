@@ -1,6 +1,6 @@
 import { CARDS, CHAPTERS, ARCHONS, RELICS, TALENTS, ELEMENTS, NODE_TYPES, REACTIONS, EVENT_EFFECTS, rarityLabel, mechanicalName, cardStats } from './data.js';
 import * as E from './engine.js';
-import { PREFIX, loadSlot, saveSlot, slotSummary, parseSave, serializeSave, validateProfile, SAVE_LIMIT } from './storage.js';
+import { PREFIX, loadSlot, saveSlot, slotSummary, parseSave, serializeSave, validateProfile, encodeSaveText, decodeSaveText, TEXT_TAG, SAVE_LIMIT } from './storage.js';
 import * as FX from './fx.js';
 import { targetKind, resolveTarget, cycleTarget } from './targeting.js';
 
@@ -10,7 +10,7 @@ let slot = 1, profile, saveError = '', conflict = false, unsaved = false;
 try { slot = Number(localStorage.getItem(PREFIX + 'active')) || 1; if (![1, 2, 3].includes(slot)) slot = 1; const result = loadSlot(slot); profile = result.profile; if (result.recovered) saveError = '已从上一份有效备份恢复存档。'; }
 catch (error) { profile = E.newProfile(); saveError = error.message; if (error.message.includes('损坏')) conflict = true; }
 const preview = E.newProfile(); E.startRun(preview, { seed: 884920 });
-const ui = { view: 'route', modal: null, selectedNode: null, selectedCard: null, target: null, filter: 'all', collection: 'cards', importData: null, toastTimer: null, log: false, viewKey: '', lastBattleKey: null, lastHandIds: new Set(), reenterUid: null };
+const ui = { view: 'route', modal: null, selectedNode: null, selectedCard: null, target: null, filter: 'all', collection: 'cards', importData: null, importFrom: '', importError: '', importText: '', exportText: '', toastTimer: null, log: false, viewKey: '', lastBattleKey: null, lastHandIds: new Set(), reenterUid: null };
 const app = document.querySelector('#app'), modalRoot = document.querySelector('#modal-root');
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const cn = id => copy.cards?.[id]?.name || mechanicalName(id);
@@ -294,11 +294,18 @@ function renderModal() {
     html = dialog('本地存档', `<p class="modal-description">进度仅存储于此浏览器、此网站地址。建议定期导出备份。</p><div class="save-slots">${[1, 2, 3].map(i => {
       const s = slotSummary(i), sr = s?.profile?.run;
       return `<div class="save-slot ${slot === i ? 'current' : ''}"><span class="slot-number">0${i}</span><div><b>${slot === i ? '当前槽位' : `存档槽位 ${i}`}</b><p>${s?.damaged ? '存档损坏 · 可导入备份替换' : sr ? `${CHAPTERS[sr.floor].region} · ${sr.phase === 'finished' ? '轮回已结束' : `第 ${sr.row + 2} 步`} · ${sr.deck.length} 张卡牌` : s ? '局外记录 · 尚未开始轮回' : '空白槽位'}</p><small>${s?.savedAt ? new Date(s.savedAt).toLocaleString('zh-CN', { hour12: false }) : '尚无保存记录'}</small></div>${slot === i ? '<span class="slot-active">使用中</span>' : button('switch-slot', '载入', 'secondary small', `data-slot="${i}"`)}</div>`;
-    }).join('')}</div>${saveError ? `<div class="notice">${esc(saveError)}</div>` : ''}<div class="save-actions">${button('export', `${icon('download', 17)} 导出当前存档`, 'secondary')}${button('import', `${icon('upload', 17)} 导入 JSON 存档`, 'secondary')}${conflict ? button('reload-slot', '重新载入当前槽位', 'primary') : ''}</div><input id="import-file" type="file" accept=".json,application/json" hidden><p class="fine-print">每次操作自动保存，同时保留上一份有效备份。清除浏览器网站数据会移除本地存档。</p>`, 'save-modal', 'LOCAL SAVE / 3 SLOTS');
+    }).join('')}</div>${saveError ? `<div class="notice">${esc(saveError)}</div>` : ''}<div class="save-actions">${button('export', `${icon('download', 17)} 导出存档文件`, 'secondary')}${button('import', `${icon('upload', 17)} 导入存档文件`, 'secondary')}</div><div class="save-actions">${button('export-text', `${icon('archive', 17)} 导出为文本`, 'secondary')}${button('import-text', `${icon('book', 17)} 粘贴文本导入`, 'secondary')}</div>${conflict ? `<div class="save-actions">${button('reload-slot', '重新载入当前槽位', 'primary')}</div>` : ''}<input id="import-file" type="file" accept=".json,application/json" hidden><p class="fine-print">文件与文本保存的是同一份数据：文本可直接存进备忘录或聊天记录，换浏览器、换设备粘贴即可还原。每次操作自动保存，同时保留上一份有效备份。清除浏览器网站数据会移除本地存档。</p>`, 'save-modal', 'LOCAL SAVE / 3 SLOTS');
+  }
+  if (ui.modal === 'export-text') {
+    const value = ui.exportText || '';
+    html = dialog('存档文本', `<p class="modal-description">下面整段字符就是完整存档。复制后可粘进备忘录、聊天记录或任意文本文件；导入时粘贴回「粘贴文本导入」即可还原。</p><textarea class="save-text" id="save-text" readonly spellcheck="false" aria-label="存档文本">${esc(value)}</textarea><p class="fine-print">共 ${value.length} 个字符 · 包含局外记录与当前轮回 · 换行与空格在导入时会被忽略。${value.includes(`${TEXT_TAG}P.`) ? '当前环境不支持压缩，文本较长但仍可正常导入。' : ''}</p><div class="save-actions">${button('copy-save-text', `${icon('archive', 16)} 复制全部`, 'secondary')}${button('saves', '返回存档', 'secondary')}</div>`, 'save-modal', 'TEXT SAVE');
+  }
+  if (ui.modal === 'import-text') {
+    html = dialog('粘贴存档文本', `<p class="modal-description">把之前保存的存档字符整段粘贴进来，读取后会先预览再替换当前槽位。</p><textarea class="save-text" id="import-text" spellcheck="false" placeholder="IRMINSUL1Z…" aria-label="粘贴存档文本">${esc(ui.importText)}</textarea>${ui.importError ? `<div class="notice">${esc(ui.importError)}</div>` : ''}<div class="save-actions">${button('confirm-import-text', '读取并预览', 'primary')}${button('saves', '返回存档', 'secondary')}</div>`, 'save-modal', 'IMPORT TEXT');
   }
   if (ui.modal === 'import-preview') {
     const p = ui.importData?.profile, r = p?.run;
-    html = dialog('导入存档预览', `<div class="import-preview"><p>目标：<b>槽位 0${slot}</b></p><p>记录时间：${esc(new Date(ui.importData.savedAt).toLocaleString('zh-CN'))}</p><p>探索：${r ? `${CHAPTERS[r.floor].region} · ${r.deck.length} 张牌` : '局外记录'}</p><p>记忆残响：${p.meta.echoes} · 轮回次数：${p.meta.runs}</p></div><p class="modal-description">导入会替换当前槽位；现有有效存档会保留一份本地备份。</p><div class="save-actions">${button('confirm-import', '导入并替换当前槽位', 'primary')}${button('saves', '返回', 'secondary')}</div>`);
+    html = dialog('导入存档预览', `<div class="import-preview"><p>目标：<b>槽位 0${slot}</b></p><p>记录时间：${esc(new Date(ui.importData.savedAt).toLocaleString('zh-CN'))}</p><p>探索：${r ? `${CHAPTERS[r.floor].region} · ${r.deck.length} 张牌` : '局外记录'}</p><p>记忆残响：${p.meta.echoes} · 轮回次数：${p.meta.runs}</p></div><p class="modal-description">导入会替换当前槽位；现有有效存档会保留一份本地备份。</p><div class="save-actions">${button('confirm-import', '导入并替换当前槽位', 'primary')}${button('import-back', '返回', 'secondary')}</div>`);
   }
   if (ui.modal === 'settings') html = dialog('游戏设置', `<div class="setting-row"><span><b>文字大小</b><small>只放大文字，界面尺寸与布局不变 · 当前 ${scalePercent()}%（右侧开关切换自适应）</small></span><button class="toggle ${scaleSetting() ? '' : 'on'}" role="switch" aria-checked="${!scaleSetting()}" aria-label="自适应字号" title="开启后按窗口宽度自动计算" data-action="toggle-autoscale"><i></i></button></div><div class="scale-slider"><span class="scale-caption">${scaleSetting() ? '手动' : '自适应'}</span><input type="range" id="text-scale" min="${SCALE_MIN}" max="${SCALE_MAX}" step="${SCALE_STEP}" value="${scalePercent()}" ${scaleSetting() ? '' : 'disabled'} aria-label="文字大小百分比"><output for="text-scale">${scalePercent()}%</output></div><div class="setting-row"><span><b>界面音效</b><small>合成的轻量交互音，无背景音乐</small></span><button class="toggle ${profile.settings.sound ? 'on' : ''}" role="switch" aria-checked="${profile.settings.sound}" aria-label="界面音效" data-action="toggle-sound"><i></i></button></div><div class="setting-row"><span><b>界面动画</b><small>同时尊重系统的减少动态效果设置</small></span><button class="toggle ${profile.settings.motion ? 'on' : ''}" role="switch" aria-checked="${profile.settings.motion}" aria-label="界面动画" data-action="toggle-motion"><i></i></button></div><div class="setting-row"><span><b>当前轮回</b><small>结束后按本局探索进度结算记忆残响</small></span>${button('abandon-confirm', '结束轮回', 'danger-button small', liveRun() ? '' : 'disabled')}</div><p class="fine-print">自适应按窗口宽度取 112%–120%；关闭后可用滑块在 90%–130% 之间固定字号（超过 120% 时卡面的风味引文会自动隐藏）。<br>推荐使用桌面浏览器。移动端支持横向浏览手牌与路线。<br>无需账号，游戏运行期间不请求第三方资源。</p>`, '', 'PREFERENCES');
   if (ui.modal === 'abandon') html = dialog('结束当前轮回', `<p class="modal-description">将结算当前获得的记忆残响。本局卡组与路线将结束。</p><div class="save-actions">${button('abandon', '结束并结算', 'danger-button')}${button('settings', '继续探索', 'secondary')}</div>`);
@@ -325,6 +332,40 @@ function toast(message) {
   const el = document.querySelector('#toast');
   el.textContent = message; el.classList.add('visible');
   clearTimeout(ui.toastTimer); ui.toastTimer = setTimeout(() => el.classList.remove('visible'), 3800);
+}
+// ---- 文本存档 ----
+async function exportSaveText() {
+  try {
+    ui.exportText = await encodeSaveText(serializeSave(profile));
+    ui.modal = 'export-text'; renderModal();
+    // 打开就把整段字符选中，用户可直接 Ctrl+C；必须排在 renderModal 自己的聚焦之后。
+    const box = modalRoot.querySelector('#save-text');
+    if (box) queueMicrotask(() => { box.focus(); box.select(); });
+  } catch (error) { toast(error.message); }
+}
+async function copySaveText() {
+  const value = ui.exportText || '';
+  let copied = false;
+  if (value && navigator.clipboard?.writeText) {
+    try { await navigator.clipboard.writeText(value); copied = true; } catch { /* 非安全上下文时回退到选区复制 */ }
+  }
+  if (!copied && value) {
+    const box = modalRoot.querySelector('#save-text');
+    if (box) { box.focus(); box.select(); try { copied = document.execCommand('copy'); } catch { copied = false; } }
+  }
+  toast(copied ? '存档文本已复制。' : '复制失败，请手动选中文本后复制。');
+}
+async function importSaveText() {
+  const raw = modalRoot.querySelector('#import-text')?.value ?? ui.importText;
+  try {
+    ui.importData = await decodeSaveText(raw);
+    // 保留粘贴内容：从预览返回时用户还能看到原文，直到真正导入成功才清空。
+    ui.importError = ''; ui.importFrom = 'import-text';
+    ui.modal = 'import-preview'; renderModal();
+  } catch (error) {
+    // 解析失败时保留已粘贴内容，方便用户对照修改，而不是清空重来。
+    ui.importText = raw; ui.importError = error.message; renderModal();
+  }
 }
 let audio;
 function sound(type = 'tap') {
@@ -565,13 +606,20 @@ document.addEventListener('click', async event => {
       const data = serializeSave(profile), url = URL.createObjectURL(new Blob([data], { type: 'application/json' }));
       const link = document.createElement('a'); link.href = url; link.download = `irminsul-slot${slot}-${new Date().toISOString().slice(0, 10)}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); toast('存档已导出。');
     }
-    if (a === 'import') document.querySelector('#import-file').click();
+    if (a === 'import') { ui.importFrom = 'saves'; document.querySelector('#import-file').click(); }
+    if (a === 'export-text') exportSaveText();
+    if (a === 'copy-save-text') copySaveText();
+    if (a === 'import-text') { ui.importText = ''; ui.importError = ''; ui.modal = 'import-text'; renderModal(); }
+    if (a === 'confirm-import-text') importSaveText();
+    if (a === 'import-back') { ui.modal = ui.importFrom || 'saves'; renderModal(); }
     if (a === 'confirm-import') {
-      const imported = E.clone(ui.importData.profile); saveSlot(slot, imported, localStorage, true); profile = imported; conflict = false; unsaved = false; saveError = ''; ui.modal = null; ui.importData = null; ui.view = 'route'; ui.selectedCard = null; ui.selectedNode = null; render(); toast('已导入存档。');
+      const imported = E.clone(ui.importData.profile); saveSlot(slot, imported, localStorage, true); profile = imported; conflict = false; unsaved = false; saveError = ''; ui.modal = null; ui.importData = null; ui.importText = ''; ui.importError = ''; ui.exportText = ''; ui.view = 'route'; ui.selectedCard = null; ui.selectedNode = null; render(); toast('已导入存档。');
     }
   } catch (error) { toast(error.message); }
 });
 document.addEventListener('input', event => {
+  // 记住粘贴内容：重绘弹窗（例如解析失败后显示错误）时不能把用户输入清空。
+  if (event.target.id === 'import-text') { ui.importText = event.target.value; return; }
   if (event.target.id !== 'text-scale') return;
   // 拖动时先改 CSS 变量即时预览，松手（change）再写入存档。
   const value = clampScale(Number(event.target.value));
@@ -589,7 +637,7 @@ document.addEventListener('change', async event => {
   }
   if (event.target.id !== 'import-file') return;
   const file = event.target.files[0]; if (!file) return;
-  try { if (file.size > SAVE_LIMIT) throw new Error('存档文件最大为 2 MB。'); ui.importData = parseSave(await file.text()); ui.modal = 'import-preview'; renderModal(); }
+  try { if (file.size > SAVE_LIMIT) throw new Error('存档文件最大为 2 MB。'); ui.importData = parseSave(await file.text()); ui.importFrom = 'saves'; ui.modal = 'import-preview'; renderModal(); }
   catch (error) { toast(error.message); event.target.value = ''; }
 });
 document.addEventListener('keydown', event => {

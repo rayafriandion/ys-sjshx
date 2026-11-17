@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { newProfile, startRun, enterNode, availableNodes, playCard, cardProblem } from '../public/src/engine.js';
-import { PREFIX, loadSlot, saveSlot, parseSave, serializeSave } from '../public/src/storage.js';
+import { PREFIX, loadSlot, saveSlot, parseSave, serializeSave, encodeSaveText, decodeSaveText } from '../public/src/storage.js';
 function memory() { const data = new Map(); return { getItem: k => data.get(k) ?? null, setItem: (k, v) => data.set(k, v) }; }
 test('slots remain independent and preserve a validated previous backup', () => {
   const s = memory(), p = loadSlot(1, s).profile; startRun(p, { seed: 4 });
@@ -60,4 +60,45 @@ test('文字大小设置会被保存校验，旧存档缺少该字段仍可读�
   // 升级前写入的存档没有 textScale，必须继续视为有效（按自适应处理）。
   delete saved.profile.settings.textScale;
   assert.equal(parseSave(JSON.stringify(saved)).profile.settings.textScale, undefined);
+});
+test('存档可以导出为字符文本，并能从字符文本原样导入', async () => {
+  const p = newProfile(); startRun(p, { seed: 9 }); enterNode(p, availableNodes(p.run)[0].id);
+  const raw = serializeSave(p), text = await encodeSaveText(raw);
+  assert.match(text, /^IRMINSUL1[ZP]\.[A-Za-z0-9_-]+$/);
+  assert.deepEqual((await decodeSaveText(text)).profile, p);
+  // 聊天软件、邮件常把长文本折行；导入时应忽略所有空白。
+  assert.deepEqual((await decodeSaveText(text.replace(/(.{50})/g, '$1\n'))).profile, p);
+  assert.deepEqual((await decodeSaveText(`  ${text}  `)).profile, p);
+  // 也接受直接粘贴 JSON 文件内容。
+  assert.deepEqual((await decodeSaveText(raw)).profile, p);
+  // 有 CompressionStream 时必须真的压缩，否则文本会长到无法粘贴。
+  if (text.startsWith('IRMINSUL1Z.')) assert.ok(text.length < raw.length);
+});
+test('缺失压缩能力时退回未压缩文本，仍可互相导入', async () => {
+  const compressed = globalThis.CompressionStream;
+  const p = newProfile(), raw = serializeSave(p);
+  try {
+    globalThis.CompressionStream = undefined;
+    const plain = await encodeSaveText(raw);
+    assert.match(plain, /^IRMINSUL1P\./);
+    assert.deepEqual((await decodeSaveText(plain)).profile, p);
+    // 压缩端产出的文本在无压缩能力的运行环境里也必须能解开。
+    globalThis.CompressionStream = compressed;
+    const packed = await encodeSaveText(raw);
+    globalThis.CompressionStream = undefined;
+    if (packed.startsWith('IRMINSUL1Z.')) assert.deepEqual((await decodeSaveText(packed)).profile, p);
+  } finally { globalThis.CompressionStream = compressed; }
+});
+test('空、乱码、截断或内容非法的存档文本都会被拒绝', async () => {
+  await assert.rejects(() => decodeSaveText(''), /粘贴/);
+  await assert.rejects(() => decodeSaveText('   '), /粘贴/);
+  await assert.rejects(() => decodeSaveText('随便一段文字'), /存档文本/);
+  await assert.rejects(() => decodeSaveText('IRMINSUL1Z.@@@@@@@@'), /存档文本/);
+  await assert.rejects(() => decodeSaveText('IRMINSUL1Z.AAAA'), /损坏/);
+  await assert.rejects(() => decodeSaveText('IRMINSUL2Z.AAAA'), /存档文本/);
+  // 压缩正确但内容不是合法存档：必须走同一套结构校验。
+  const bogus = await encodeSaveText('{"format":"other"}');
+  await assert.rejects(() => decodeSaveText(bogus), /存档/);
+  const text = await encodeSaveText(serializeSave(newProfile()));
+  await assert.rejects(() => decodeSaveText(text.slice(0, -12)), /损坏|JSON/);
 });

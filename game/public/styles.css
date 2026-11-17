@@ -476,6 +476,11 @@ html[data-text-scale="lg"] .card-detail-pair .card-copy q { display: block; }
 .slot-active { font-size: calc(9px * var(--text-scale)); color: #c3ce9e; }
 .save-actions { display: flex; gap: 12px; margin-top: 24px; flex-wrap: wrap; }
 .save-actions .button { font-size: calc(11px * var(--text-scale)); flex: 1; white-space: nowrap; }
+.save-actions + .save-actions { margin-top: 10px; }
+.save-text { display: block; width: 100%; min-height: 132px; max-height: 40vh; resize: vertical; background: #0c1a14; border: 1px solid #96ae7455; border-radius: 3px; padding: 11px 13px; color: #b9c9a3; font: calc(10px * var(--text-scale))/1.75 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; margin-bottom: 14px; }
+.save-text:focus { outline: 1px solid #a8bd8477; }
+.save-text::placeholder { color: #4e6c43; }
+.save-text + .fine-print { margin-top: 0; }
 .fine-print { color: #708b63; font-size: calc(9px * var(--text-scale)); line-height: 1.9; margin-top: 24px; }
 .setting-row { display: flex; justify-content: space-between; gap: 20px; align-items: center; padding: 22px 0; border-bottom: 1px solid #9aaf7c25; }
 .setting-row b { display: block; font: calc(15px * var(--text-scale)) var(--serif); color: #c9d2b1; }
@@ -969,6 +974,8 @@ html[data-text-scale="lg"] .card-detail-pair .card-copy q { display: block; }
   .reaction-table p { font-size: calc(9px * var(--text-scale)); }
   .reaction-table .element-glyph { font-size: calc(18px * var(--text-scale)); }
   .fine-print { font-size: calc(8px * var(--text-scale)); margin-top: 20px; }
+  .save-text { min-height: 108px; max-height: 34vh; font-size: calc(9px * var(--text-scale)); }
+  .save-text + .fine-print { margin-top: 0; }
   #toast { left: 50%; bottom: 77px; width: max-content; font-size: calc(11px * var(--text-scale)); padding: 11px 18px; }
   .inspect-overlay { padding: 16px; }
   .inspect-panel { padding: 22px; }

@@ -113,6 +113,62 @@ export function serializeSave(profile, revision = 0) {
   validateProfile(profile);
   return JSON.stringify({ format: 'irminsul-save', version: VERSION, revision, savedAt: new Date().toISOString(), profile }, null, 2);
 }
+// ---- 文本存档 ----
+// 文本存档 = "IRMINSUL1Z." + base64url(deflate(紧凑 JSON))。
+// Z 表示已压缩；运行环境没有 CompressionStream 时退化为 "IRMINSUL1P." + base64url(JSON)。
+// 压缩直接复用浏览器与 Node 自带的 CompressionStream（zlib deflate），不引入第三方库，
+// 也不自造压缩格式，所以任意端生成的文本都能在另一端解开。
+export const TEXT_TAG = 'IRMINSUL1';
+const TEXT_LIMIT = SAVE_LIMIT * 2;
+function toBase64Url(bytes) {
+  let binary = '';
+  // 分块拼接：一次展开整个数组会超出 String.fromCharCode 的参数上限。
+  for (let i = 0; i < bytes.length; i += 0x4000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x4000));
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function fromBase64Url(text) {
+  // 宽容处理：允许粘贴时混入 URL 编码式的 + / = 变体，以及缺失的补位等号。
+  const base64 = text.replace(/-/g, '+').replace(/_/g, '/').replace(/=+$/, '');
+  if (!/^[A-Za-z0-9+/]+$/.test(base64) || base64.length % 4 === 1) throw new Error('存档文本包含非法字符。');
+  const binary = atob(base64 + '='.repeat((4 - (base64.length % 4)) % 4));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+export async function encodeSaveText(raw) {
+  assert(typeof raw === 'string' && raw.length <= SAVE_LIMIT, '存档文件过大，最大 2 MB。');
+  let compact;
+  try { compact = JSON.stringify(JSON.parse(raw)); } catch { throw new Error('无法读取 JSON 存档。'); }
+  const bytes = new TextEncoder().encode(compact);
+  if (typeof CompressionStream === 'function') {
+    try {
+      const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('deflate'));
+      return `${TEXT_TAG}Z.${toBase64Url(new Uint8Array(await new Response(stream).arrayBuffer()))}`;
+    } catch { /* 压缩不可用时退回未压缩文本，导出必须始终可用。 */ }
+  }
+  return `${TEXT_TAG}P.${toBase64Url(bytes)}`;
+}
+export async function decodeSaveText(text) {
+  assert(typeof text === 'string', '请粘贴存档文本。');
+  const trimmed = text.trim();
+  assert(trimmed.length > 0, '请粘贴存档文本。');
+  assert(trimmed.length <= TEXT_LIMIT, '存档文本过大，请确认是否复制了完整内容。');
+  // 也接受直接粘贴 JSON 文件内容，省去用户「先转文本」的步骤。
+  if (trimmed.startsWith('{')) return parseSave(trimmed);
+  // 文本可能被聊天软件、邮件折行，去掉全部空白再解析。
+  const body = trimmed.replace(/\s+/g, '');
+  // 兼容 base64url（-_）与普通 base64（+/=）两种粘贴形态；`-` 必须放在末尾避免被当成范围。
+  const match = /^IRMINSUL1([ZP])\.([A-Za-z0-9_+/=-]+)$/i.exec(body);
+  assert(match, '这不是有效的存档文本，请确认以 IRMINSUL1 开头且复制完整。');
+  let json;
+  try {
+    const bytes = fromBase64Url(match[2]);
+    json = new TextDecoder('utf-8', { fatal: true }).decode(match[1].toUpperCase() === 'Z'
+      ? new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer())
+      : bytes);
+  } catch { throw new Error('存档文本已损坏或复制不完整。'); }
+  return parseSave(json);
+}
 export function loadSlot(slot, storage = localStorage) {
   const key = PREFIX + slot, raw = storage.getItem(key);
   if (!raw) { expectedRevisions.set(key, 0); return { profile: newProfile(), recovered: false }; }
