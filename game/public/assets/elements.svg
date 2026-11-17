@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg">
+  <symbol id="physical" viewBox="0 0 32 32"><path d="M16 3 24 16 16 29 8 16Z M16 9v14 M11 16h10"/></symbol>
+  <symbol id="anemo" viewBox="0 0 32 32"><path d="M16 15C10 10 12 5 16 3c4 2 6 7 0 12ZM15 17C7 18 5 14 7 10c2 4 5 4 8 7Zm2 0c8 1 10-3 8-7-2 4-5 4-8 7ZM9 21c3 4 11 4 14 0 M12 25l4 3 4-3"/></symbol>
+  <symbol id="geo" viewBox="0 0 32 32"><path d="M16 3 27 16 16 29 5 16Z M16 8l7 8-7 8-7-8Z M9 16h14 M16 8v16"/></symbol>
+  <symbol id="electro" viewBox="0 0 32 32"><path d="M18 3 7 18h8l-1 11 11-16h-8Z M6 9l2-3 M24 26l2-3"/></symbol>
+  <symbol id="dendro" viewBox="0 0 32 32"><path d="M16 27V14 M16 23C7 23 5 17 6 10c6 0 11 5 10 13ZM16 19c8 0 11-6 10-13-7 1-11 6-10 13ZM11 28h10"/></symbol>
+  <symbol id="hydro" viewBox="0 0 32 32"><path d="M16 3C13 9 7 14 7 20a9 9 0 0 0 18 0C25 14 19 9 16 3Z M12 20c0 3 2 5 5 5"/></symbol>
+  <symbol id="pyro" viewBox="0 0 32 32"><path d="M16 29C7 29 5 22 9 15c1 4 3 4 4 3 3-4 2-9 2-14 8 4 8 10 7 14 2 0 3-1 4-4 4 8 0 15-10 15Z M16 25c-3-2-2-5 1-8 0 3 4 5-1 8Z"/></symbol>
+  <symbol id="cryo" viewBox="0 0 32 32"><path d="M16 3v26 M5 9l22 14 M5 23 27 9 M12 6l4 4 4-4 M12 26l4-4 4 4 M6 14l5-1-1-5 M26 18l-5 1 1 5 M6 18l5 1-1 5 M26 14l-5-1 1-5"/></symbol>
+  <symbol id="lunar" viewBox="0 0 32 32"><path d="M19 3C8 5 5 23 19 27 12 21 12 9 19 3Z M24 8v8 M20 12h8"/></symbol>
+</svg>

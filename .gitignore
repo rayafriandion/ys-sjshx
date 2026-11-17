@@ -1,0 +1,16 @@
+# 本地代理工作目录（含记忆与项目内部数据），不入版本库
+.workbuddy/
+
+# 依赖与构建产物
+node_modules/
+dist/
+
+# 视觉回归与截图产物
+artifacts/
+*.log
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
