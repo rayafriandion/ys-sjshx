@@ -3,6 +3,7 @@ import * as E from './engine.js';
 import { PREFIX, loadSlot, saveSlot, slotSummary, parseSave, serializeSave, validateProfile, encodeSaveText, decodeSaveText, TEXT_TAG, SAVE_LIMIT } from './storage.js';
 import * as FX from './fx.js';
 import { targetKind, resolveTarget, cycleTarget } from './targeting.js';
+import { gestureIntent } from './gesture.js';
 
 let copy = {};
 try { const response = await fetch('./content/zh-CN.json'); if (response.ok) copy = await response.json(); } catch { /* Mechanical labels remain playable offline. */ }
@@ -55,7 +56,8 @@ const paths = {
 };
 // ---- 文字大小（只影响字号，不影响布局）----
 // settings.textScale：0（或缺失）表示自适应，按窗口宽度计算；否则为 90–140 的手动百分比。
-// 界面尺寸仍是固定 px，只有 font-size / font 简写接入 --text-scale，因此放字不会改变盒子大小。
+// 分辨率适配由 CSS 的 --u 负责（见 styles.css 顶部），这里只处理玩家的字号偏好：
+// 两者相乘得到最终字号，所以放字不会改变盒子尺寸，缩放窗口则整体等比变化。
 const SCALE_MIN = 90, SCALE_MAX = 130, SCALE_STEP = 5;
 let textScale = 1;
 function adaptiveTextScale() {
@@ -76,7 +78,7 @@ function applyScale() {
   return textScale;
 }
 function icon(name, size = 20) { return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.star}</svg>`; }
-function art(element, variant = 0) {
+function art(element, variant = 0, motif = '', aoe = false) {
   const motifs = {
     physical: '<path d="m49 14-7 59 7 9 7-9-7-59Zm-15 54h30M43 88h12M49 82v11"/>',
     anemo: '<path d="M49 77C7 67 13 39 38 42c-12 8-6 21 11 23 17-2 23-15 11-23 25-3 31 25-11 35ZM49 62C20 48 35 27 49 17c14 10 29 31 0 45ZM27 83l22 11 22-11"/>',
@@ -88,7 +90,26 @@ function art(element, variant = 0) {
     cryo: '<path d="M49 12v82M14 32l70 41M14 73l70-41M38 20l11 10 11-10M38 86l11-10 11 10M17 45l14-3-2-15m40 59-2-15 14-3M17 60l14 3-2 15m40-59-2 15 14 3"/>',
     lunar: '<path d="M61 16C9 21 13 83 60 88 31 71 29 39 61 16ZM70 41l3 10 10 3-10 3-3 10-3-10-10-3 10-3Z"/>'
   };
-  return `<svg class="card-art" viewBox="0 0 100 112" fill="none" stroke="currentColor" stroke-width="1.1"><circle cx="49" cy="55" r="43" opacity=".2"/><circle cx="49" cy="55" r="37" opacity=".12"/><path d="M49 1 95 55 49 110 3 55Z" opacity=".18"/>${motifs[element]}<circle cx="${15 + variant % 3 * 9}" cy="19" r="1.4" fill="currentColor" stroke="none"/><circle cx="87" cy="92" r="1" fill="currentColor" stroke="none"/></svg>`;
+  /* 有语义主图标时：元素图案降为底纹（保留元素身份），中心叠加按卡牌功能选择的图标，
+     使同元素的不同卡牌立绘各不相同且可读出用途；无语义时保持纯元素图案。 */
+  const rays = aoe ? '<path d="M49 17v9M31 22l6 7M67 22l-6 7" opacity=".5"/>' : '';
+  const center = motif && paths[motif]
+    ? `<g opacity=".28">${motifs[element]}</g><g transform="translate(26.2 34.2) scale(1.9)" stroke-width="1.2">${paths[motif]}</g>`
+    : motifs[element];
+  return `<svg class="card-art" viewBox="0 0 100 112" fill="none" stroke="currentColor" stroke-width="1.1"><circle cx="49" cy="55" r="43" opacity=".2"/><circle cx="49" cy="55" r="37" opacity=".12"/><path d="M49 1 95 55 49 110 3 55Z" opacity=".18"/>${center}${rays}<circle cx="${15 + variant % 3 * 9}" cy="19" r="1.4" fill="currentColor" stroke="none"/><circle cx="87" cy="92" r="1" fill="currentColor" stroke="none"/></svg>`;
+}
+/* 卡牌立绘的语义主图标：按效果主项选择——伤害→交叉剑、护盾→盾、治疗→心、
+   充能/抽牌→闪电、共鸣→星火、净化/清除→星；同元素卡牌因此互不雷同。 */
+function motifFor(d) {
+  const s = d.effects || {};
+  if (s.purge || s.cleanse) return 'star';
+  if (s.resonance) return 'sparkles';
+  if (s.trueDamage) return 'swords';
+  if (s.damage && s.damage >= Math.max(s.shield || 0, s.heal || 0)) return 'swords';
+  if (s.heal && s.heal >= (s.shield || 0)) return 'heart';
+  if (s.shield) return 'shield';
+  if (s.draw || s.energy) return 'bolt';
+  return '';
 }
 function effectsText(c) {
   const s = cardStats(c), d = CARDS[c.cardId ?? c.id], parts = [];
@@ -104,17 +125,55 @@ function effectsText(c) {
   if (s.purge) parts.push('净化此牌');
   return parts.join(' / ');
 }
+/* 卡牌费用：战斗中取动态费用（减费/临时变化），其它场景取静态基准。 */
+function cardCostOf(c) {
+  const d = CARDS[c.cardId ?? c.id];
+  return profile.run?.battle && profile.run.phase === 'combat' ? E.cardCost(profile, c) : Math.max(0, d.cost - (c.upgraded && ['resonance', 'focus'].includes(d.id) ? 1 : 0));
+}
+/* 卡面布局参考极简模板：费用⚡ + 卡名 + 元素标 / 立绘 / 效果文字。
+   稀有度、消耗/保留/荒芒与风味引文不在卡面上，统一收进悬停详情。 */
 function cardHTML(c, { action = '', disabled = false, compact = false, selected = false, attrs = '' } = {}) {
   if (typeof c === 'string') c = { cardId: c, upgraded: false };
   const d = CARDS[c.cardId], color = ELEMENTS[d.element].color;
-  const cost = profile.run?.battle && profile.run.phase === 'combat' ? E.cardCost(profile, c) : Math.max(0, d.cost - (c.upgraded && ['resonance', 'focus'].includes(d.id) ? 1 : 0));
-  return `<${action ? 'button type="button"' : 'article'} class="game-card ${compact ? 'compact' : ''} ${selected ? 'selected' : ''} rarity-${d.rarity}" style="--element:${color}" ${action ? `data-action="${action}" data-uid="${esc(c.uid || '')}" data-card="${d.id}" ${disabled ? 'disabled' : ''}` : ''} ${attrs}>
-    <div class="card-top"><span class="cost">${cost}</span><span>${ELEMENTS[d.element].label} ${glyph(d.element)}</span></div>
-    <div class="card-illustration">${art(d.element, Object.keys(CARDS).indexOf(d.id))}<span class="art-orbit"></span></div>
-    <div class="card-copy"><div class="card-rarity">${rarityLabel[d.rarity]}${d.exhaust ? ' · 消耗' : ''}${d.retain ? ' · 保留' : ''}${d.arkhe ? ' · 荒芒' : ''}</div><h3>${esc(cn(d.id))}${c.upgraded ? '<em>＋</em>' : ''}</h3><p>${esc(effectsText(c))}</p>${(c.upgraded ? copy.cards?.[d.id]?.upgradedFlavor : copy.cards?.[d.id]?.flavor) ? `<q>${esc(c.upgraded ? copy.cards[d.id].upgradedFlavor : copy.cards[d.id].flavor)}</q>` : ''}</div>
-    <span class="card-corner"></span>
+  return `<${action ? 'button type="button"' : 'article'} class="game-card ${compact ? 'compact' : ''} ${selected ? 'selected' : ''} rarity-${d.rarity}" style="--element:${color}" data-card="${d.id}" ${action ? `data-action="${action}" data-uid="${esc(c.uid || '')}" ${disabled ? 'disabled' : ''}` : ''} ${attrs}>
+    <div class="card-top"><span class="cost">${cardCostOf(c)}${icon('bolt', 11)}</span><h3>${esc(cn(d.id))}${c.upgraded ? '<em>＋</em>' : ''}</h3><span class="card-element">${glyph(d.element)}</span></div>
+    <div class="card-illustration">${art(d.element, Object.keys(CARDS).indexOf(d.id), motifFor(d), d.aoe)}</div>
+    <div class="card-copy"><p>${esc(effectsText(c))}</p></div>
   </${action ? 'button' : 'article'}>`;
 }
+/* ---- 卡牌悬停详情：稀有度、消耗/保留/荒芒与风味引文统一收进悬浮卡片 ---- */
+let tipCard = null;
+function tipHTML(c) {
+  const d = CARDS[c.cardId ?? c.id];
+  const flavor = c.upgraded ? copy.cards?.[d.id]?.upgradedFlavor : copy.cards?.[d.id]?.flavor;
+  const problem = profile.run?.battle && c.uid ? E.cardProblem(profile, c) : '';
+  const tags = [ELEMENTS[d.element].label, rarityLabel[d.rarity], d.exhaust ? '消耗' : '', d.retain ? '保留' : '', d.arkhe ? '荒芒' : ''].filter(Boolean);
+  return `<h4>${esc(cn(d.id))}${c.upgraded ? '＋' : ''}<span class="tip-cost">${cardCostOf(c)}${icon('bolt', 11)}</span></h4><div class="tip-meta">${tags.map(t => `<span>${t}</span>`).join('')}</div><p>${esc(effectsText(c))}</p>${flavor ? `<q>${esc(flavor)}</q>` : ''}${problem ? `<p class="tip-problem">${esc(problem)}</p>` : ''}`;
+}
+function showTip(card) {
+  if (card === tipCard) return;
+  const tip = document.getElementById('card-tip');
+  if (!tip || !card.isConnected) return;
+  tipCard = card;
+  tip.innerHTML = tipHTML({ cardId: card.dataset.card, upgraded: !!card.querySelector('h3 em'), uid: card.dataset.uid || '' });
+  tip.hidden = false;
+  const r = card.getBoundingClientRect(), w = tip.offsetWidth, h = tip.offsetHeight;
+  const left = Math.min(Math.max(8, r.left + r.width / 2 - w / 2), window.innerWidth - w - 8);
+  let top = r.top - h - 10;
+  if (top < 8) top = r.bottom + 10;
+  tip.style.left = `${Math.round(left)}px`;
+  tip.style.top = `${Math.round(top)}px`;
+}
+function hideTip() { tipCard = null; const tip = document.getElementById('card-tip'); if (tip) tip.hidden = true; }
+document.addEventListener('pointerover', event => {
+  if (drag) return;                                   // 拖拽中不弹详情
+  const host = event.target.closest?.('.hand-card-wrap, .game-card[data-card]');
+  const card = host?.matches?.('.game-card') ? host : host?.querySelector('.game-card[data-card]');
+  if (card) showTip(card);
+});
+document.addEventListener('pointerout', event => { if (event.target.closest?.('.hand-card-wrap, .game-card[data-card]')) hideTip(); });
+document.addEventListener('pointerdown', hideTip);
+document.addEventListener('scroll', hideTip, true);
 function navItem(view, name, ico, extra = '') {
   return `<button type="button" class="nav-item ${ui.view === view ? 'active' : ''}" data-action="view" data-view="${view}" aria-label="${name}" title="${name}">${icon(ico)}<span>${name}</span>${extra}</button>`;
 }
@@ -225,7 +284,7 @@ function combatView() {
       ${ui.log ? `<div class="combat-log"><div><b>战斗记录</b><button class="icon-button" data-action="toggle-log" aria-label="关闭战斗记录">${icon('close', 16)}</button></div>${b.log.slice(0, 12).map(t => `<p>${esc(t)}</p>`).join('')}</div>` : ''}
     </section>
     <section class="hand-panel"><div class="hand-header"><div class="energy-orb"><strong>${b.energy}</strong><span> / ${b.maxEnergy}</span>${icon('bolt', 15)}</div><div class="hand-instruction"><strong>${selected ? `已选择 ${esc(cn(selected.cardId))}` : '你的回合'}</strong><span>${selected ? '← → 选择目标 · Enter 确认 · 也可拖拽卡牌至目标' : '数字键选牌 · 点击或拖拽卡牌至目标'}</span></div><div class="pile-buttons"><button data-action="pile" data-pile="draw">${icon('cards', 18)}<span>抽牌堆 <b>${b.draw.length}</b></span></button><button data-action="pile" data-pile="discard">${icon('archive', 18)}<span>弃牌堆 <b>${b.discard.length}</b></span></button><button data-action="pile" data-pile="exhaust">${icon('flame', 18)}<span>消耗 <b>${b.exhaust.length}</b></span></button></div></div>
-      <div class="hand-cards">${b.hand.map((c, i) => `<div class="hand-card-wrap${newCards.has(c.uid) ? ' fx-stagger' : ''}" style="--fx-i:${i}"><span class="card-key">${i < 9 ? i + 1 : i === 9 ? '0' : ''}</span>${cardHTML(c, { action: 'select-card', selected: ui.selectedCard === c.uid, disabled: !!E.cardProblem(profile, c), attrs: `title="${esc(E.cardProblem(profile, c) || effectsText(c))}"` })}</div>`).join('') || '<div class="empty-hand">手牌已用尽 · 结束回合以抽取新手牌</div>'}</div>
+      <div class="hand-cards" style="--hand-n:${b.hand.length || 1}">${b.hand.map((c, i) => `<div class="hand-card-wrap${newCards.has(c.uid) ? ' fx-stagger' : ''}" style="--fx-i:${i}">${cardHTML(c, { action: 'select-card', selected: ui.selectedCard === c.uid, disabled: !!E.cardProblem(profile, c) })}${i < 10 ? `<span class="card-key" aria-hidden="true">${i === 9 ? '0' : i + 1}</span>` : ''}</div>`).join('') || '<div class="empty-hand">手牌已用尽 · 结束回合以抽取新手牌</div>'}</div>
       <div class="hand-footer"><span>${selected ? `${esc(cn(selected.cardId))} → ${isSelf ? '旅行者' : esc(target?.boss ? chapterText(r).bossName || '首领' : '当前敌人')}` : '护盾于敌人行动后清空；未打出的牌进入弃牌堆。'}</span><div>${selected ? button('play-selected', `打出卡牌 <kbd>Enter</kbd>`, 'primary', b.inspect ? 'disabled' : '') : ''}${button('end-turn', `结束回合 <kbd>E</kbd>`, 'end-turn', b.inspect ? 'disabled' : '')}</div></div>
     </section>${b.inspect ? inspectOverlay(b) : ''}`;
 }
@@ -249,7 +308,9 @@ function encounterView() {
 }
 function shopView() {
   const r = profile.run, s = r.shop;
-  return `<section class="shop-screen"><p class="eyebrow">THE TRAVELING MERCHANT</p><div class="page-heading"><div><h1>行旅商会</h1><p class="muted">购买即加入卡组，离开后无法返回。</p></div><span class="shop-gold">${icon('coin', 24)} ${r.gold}</span></div><div class="shop-grid">${s.cards.map((c, i) => `<div class="shop-item ${c.sold ? 'sold' : ''}">${cardHTML(c.id)}${button('buy-card', c.sold ? '已购买' : `${icon('coin', 16)} ${c.price}`, 'secondary wide', `data-index="${i}" ${c.sold || r.gold < c.price ? 'disabled' : ''}`)}</div>`).join('')}<div class="shop-services">${s.relic ? `<div class="shop-relic"><div class="large-relic" style="--element:${ELEMENTS[RELICS[s.relic].element].color}">${art(RELICS[s.relic].element)}</div><h3>${esc(rn(s.relic))}</h3><p>${esc(RELICS[s.relic].effect)}</p>${button('buy-relic', s.relicSold ? '已购买' : `${icon('coin', 16)} 140`, 'secondary wide', s.relicSold || r.gold < 140 ? 'disabled' : '')}</div>` : ''}<div class="remove-service">${icon('cards', 24)}<b>精简卡组</b><p>选择移除一张卡牌</p>${button('shop-remove', s.removed ? '已使用' : `${icon('coin', 16)} 75`, 'secondary wide', s.removed || r.gold < 75 || r.deck.length <= 5 ? 'disabled' : '')}</div></div></div><div class="center">${button('leave-shop', `继续探索 ${icon('arrow', 16)}`, 'primary')}</div></section>`;
+  /* 结构：圣遗物（价格随件）→ 卡牌（价格随件，卡面与战斗一致）→ 精简卡组服务条。 */
+  const relicItem = s.relic ? `<div class="shop-item ${s.relicSold ? 'sold' : ''}"><div class="shop-relic-card" style="--element:${ELEMENTS[RELICS[s.relic].element].color}"><div class="shop-relic-art">${art(RELICS[s.relic].element)}</div><h3>${esc(rn(s.relic))}</h3><p>${esc(RELICS[s.relic].effect)}</p></div>${button('buy-relic', s.relicSold ? '已购买' : `${icon('coin', 16)} 140`, 'secondary wide', s.relicSold || r.gold < 140 ? 'disabled' : '')}</div>` : '';
+  return `<section class="shop-screen"><p class="eyebrow">THE TRAVELING MERCHANT</p><div class="page-heading"><div><h1>行旅商会</h1><p class="muted">购买即加入卡组，离开后无法返回。</p></div><span class="shop-gold">${icon('coin', 24)} ${r.gold}</span></div>${relicItem ? `<h2 class="shop-heading">${icon('star', 16)} 圣遗物</h2><div class="shop-row">${relicItem}</div>` : ''}<h2 class="shop-heading">${icon('cards', 16)} 卡牌</h2><div class="shop-row">${s.cards.map((c, i) => `<div class="shop-item ${c.sold ? 'sold' : ''}">${cardHTML(c.id)}${button('buy-card', c.sold ? '已购买' : `${icon('coin', 16)} ${c.price}`, 'secondary wide', `data-index="${i}" ${c.sold || r.gold < c.price ? 'disabled' : ''}`)}</div>`).join('')}</div><div class="remove-service">${icon('cards', 22)}<div class="remove-copy"><b>精简卡组</b><p>选择移除一张卡牌</p></div>${button('shop-remove', s.removed ? '已使用' : `${icon('coin', 16)} 75`, 'secondary', s.removed || r.gold < 75 || r.deck.length <= 5 ? 'disabled' : '')}</div><div class="center">${button('leave-shop', `继续探索 ${icon('arrow', 16)}`, 'primary')}</div></section>`;
 }
 function codexView() {
   const tabs = [['cards', '卡牌'], ['relics', '圣遗物']];
@@ -277,12 +338,20 @@ function summaryView() {
 }
 function render() {
   applyScale();
+  hideTip();                                          // 卡牌随渲染重建，旧详情立即失效
   document.documentElement.dataset.motion = profile.settings.motion ? 'on' : 'off';
   // 视图或阶段变化时，为工作区加入一次性入场动画类。
   const viewKey = `${ui.view}:${profile.run?.phase || 'meta'}:${profile.run?.floor ?? ''}`;
   const enter = viewKey !== ui.viewKey;
   ui.viewKey = viewKey;
-  app.innerHTML = `${sidebar()}<main class="main" data-chapter="${CHAPTERS[rview().floor].id}">${header()}<div class="workspace${enter ? ' fx-enter' : ''}">${({ route: routeView, codex: codexView, archons: archonView, talents: talentView })[ui.view]()}</div><footer class="footer"><span>✧ ${esc(title())}<i> · </i>元素策略卡牌 Roguelike</span><span>LOCAL SESSION <i> / </i> SLOT 0${slot}</span><button class="text-button" data-action="help">操作说明 ${icon('help', 13)}</button></footer></main>`;
+  // 重渲染会重建整棵 DOM，手牌区的横向滚动位置会归零；手机上「翻到手牌中段→点牌」
+  // 会因此跳回最左。同一手牌下记住并恢复滚动位置，手牌换新时仍从第一张开始。
+  const oldHand = document.querySelector('.hand-cards');
+  const handScroll = oldHand?.scrollLeft || 0;
+  const handUids = oldHand ? [...oldHand.querySelectorAll('[data-uid]')].map(el => el.dataset.uid).join() : '';
+  app.innerHTML = `${sidebar()}<main class="main" data-chapter="${CHAPTERS[rview().floor].id}" data-phase="${profile.run?.phase || 'meta'}">${header()}<div class="workspace${enter ? ' fx-enter' : ''}">${({ route: routeView, codex: codexView, archons: archonView, talents: talentView })[ui.view]()}</div><footer class="footer"><span>✧ ${esc(title())}<i> · </i>元素策略卡牌 Roguelike</span><span>LOCAL SESSION <i> / </i> SLOT 0${slot}</span><button class="text-button" data-action="help">操作说明 ${icon('help', 13)}</button></footer></main>`;
+  const newHand = document.querySelector('.hand-cards');
+  if (newHand && handScroll && newHand.querySelectorAll('[data-uid]').length && [...newHand.querySelectorAll('[data-uid]')].map(el => el.dataset.uid).join() === handUids) newHand.scrollLeft = handScroll;
   renderModal();
 }
 function dialog(title, body, cls = '', subtitle = '') {
@@ -307,7 +376,7 @@ function renderModal() {
     const p = ui.importData?.profile, r = p?.run;
     html = dialog('导入存档预览', `<div class="import-preview"><p>目标：<b>槽位 0${slot}</b></p><p>记录时间：${esc(new Date(ui.importData.savedAt).toLocaleString('zh-CN'))}</p><p>探索：${r ? `${CHAPTERS[r.floor].region} · ${r.deck.length} 张牌` : '局外记录'}</p><p>记忆残响：${p.meta.echoes} · 轮回次数：${p.meta.runs}</p></div><p class="modal-description">导入会替换当前槽位；现有有效存档会保留一份本地备份。</p><div class="save-actions">${button('confirm-import', '导入并替换当前槽位', 'primary')}${button('import-back', '返回', 'secondary')}</div>`);
   }
-  if (ui.modal === 'settings') html = dialog('游戏设置', `<div class="setting-row"><span><b>文字大小</b><small>只放大文字，界面尺寸与布局不变 · 当前 ${scalePercent()}%（右侧开关切换自适应）</small></span><button class="toggle ${scaleSetting() ? '' : 'on'}" role="switch" aria-checked="${!scaleSetting()}" aria-label="自适应字号" title="开启后按窗口宽度自动计算" data-action="toggle-autoscale"><i></i></button></div><div class="scale-slider"><span class="scale-caption">${scaleSetting() ? '手动' : '自适应'}</span><input type="range" id="text-scale" min="${SCALE_MIN}" max="${SCALE_MAX}" step="${SCALE_STEP}" value="${scalePercent()}" ${scaleSetting() ? '' : 'disabled'} aria-label="文字大小百分比"><output for="text-scale">${scalePercent()}%</output></div><div class="setting-row"><span><b>界面音效</b><small>合成的轻量交互音，无背景音乐</small></span><button class="toggle ${profile.settings.sound ? 'on' : ''}" role="switch" aria-checked="${profile.settings.sound}" aria-label="界面音效" data-action="toggle-sound"><i></i></button></div><div class="setting-row"><span><b>界面动画</b><small>同时尊重系统的减少动态效果设置</small></span><button class="toggle ${profile.settings.motion ? 'on' : ''}" role="switch" aria-checked="${profile.settings.motion}" aria-label="界面动画" data-action="toggle-motion"><i></i></button></div><div class="setting-row"><span><b>当前轮回</b><small>结束后按本局探索进度结算记忆残响</small></span>${button('abandon-confirm', '结束轮回', 'danger-button small', liveRun() ? '' : 'disabled')}</div><p class="fine-print">自适应按窗口宽度取 112%–120%；关闭后可用滑块在 90%–130% 之间固定字号（超过 120% 时卡面的风味引文会自动隐藏）。<br>推荐使用桌面浏览器。移动端支持横向浏览手牌与路线。<br>无需账号，游戏运行期间不请求第三方资源。</p>`, '', 'PREFERENCES');
+  if (ui.modal === 'settings') html = dialog('游戏设置', `<div class="setting-row"><span><b>文字大小</b><small>只放大文字，界面尺寸与布局不变 · 当前 ${scalePercent()}%（右侧开关切换自适应）</small></span><button class="toggle ${scaleSetting() ? '' : 'on'}" role="switch" aria-checked="${!scaleSetting()}" aria-label="自适应字号" title="开启后按窗口宽度自动计算" data-action="toggle-autoscale"><i></i></button></div><div class="scale-slider"><span class="scale-caption">${scaleSetting() ? '手动' : '自适应'}</span><input type="range" id="text-scale" min="${SCALE_MIN}" max="${SCALE_MAX}" step="${SCALE_STEP}" value="${scalePercent()}" ${scaleSetting() ? '' : 'disabled'} aria-label="文字大小百分比"><output for="text-scale">${scalePercent()}%</output></div><div class="setting-row"><span><b>界面音效</b><small>合成的轻量交互音，无背景音乐</small></span><button class="toggle ${profile.settings.sound ? 'on' : ''}" role="switch" aria-checked="${profile.settings.sound}" aria-label="界面音效" data-action="toggle-sound"><i></i></button></div><div class="setting-row"><span><b>界面动画</b><small>同时尊重系统的减少动态效果设置</small></span><button class="toggle ${profile.settings.motion ? 'on' : ''}" role="switch" aria-checked="${profile.settings.motion}" aria-label="界面动画" data-action="toggle-motion"><i></i></button></div><div class="setting-row"><span><b>当前轮回</b><small>结束后按本局探索进度结算记忆残响</small></span>${button('abandon-confirm', '结束轮回', 'danger-button small', liveRun() ? '' : 'disabled')}</div><p class="fine-print">自适应按窗口宽度取 112%–120%；关闭后可用滑块在 90%–130% 之间固定字号（超过 120% 时图鉴卡面的风味引文会自动隐藏；手牌区为保持紧凑始终不显示引文）。<br>界面尺寸随窗口等比缩放，720P 到 4K 都能一屏看完整场战斗。<br>推荐使用桌面浏览器。移动端支持横向浏览手牌与路线。<br>无需账号，游戏运行期间不请求第三方资源。</p>`, '', 'PREFERENCES');
   if (ui.modal === 'abandon') html = dialog('结束当前轮回', `<p class="modal-description">将结算当前获得的记忆残响。本局卡组与路线将结束。</p><div class="save-actions">${button('abandon', '结束并结算', 'danger-button')}${button('settings', '继续探索', 'secondary')}</div>`);
   if (ui.modal === 'new-run') html = dialog(liveRun() ? '开启新的轮回' : '轮回准备', `<p class="modal-description">${liveRun() ? '开启后会结算当前轮回，并建立新的卡组与路线。' : '12 张初始卡牌 · 3 点行动能量 · 8 章探索'}</p><label class="field-label" for="seed">路线种子 <span>留空随机生成；相同种子生成相同路线</span></label><input id="seed" class="input" inputmode="numeric" placeholder="例如 884920" maxlength="10"><label class="field-label" for="spiral">渊月难度</label><select class="input" id="spiral">${Array.from({ length: profile.meta.maxSpiral + 1 }, (_, i) => `<option value="${i}">${i === 0 ? '标准难度' : `渊月 ${i} · 敌人强度 +${i * 6}%`}</option>`).join('')}</select><label class="field-label" for="blessing">初始助战</label><select class="input" id="blessing" ${profile.meta.talents.blessing ? '' : 'disabled'}><option value="">无初始助战${profile.meta.talents.blessing ? '' : ' · 需点亮「古神遗泽」'}</option>${profile.meta.talents.blessing ? profile.meta.unlockedArchons.map(id => `<option value="${id}">${esc(an(id))}</option>`).join('') : ''}</select><div class="save-actions">${button('confirm-start', `进入轮回 ${icon('arrow', 17)}`, 'primary wide')}</div>`, '', 'A NEW CYCLE');
   if (ui.modal === 'deck') html = dialog(`当前卡组 <span class="muted">${r.deck.length} 张</span>`, `<div class="card-grid modal-card-grid">${r.deck.map(c => cardHTML(c)).join('')}</div>`, 'wide-modal', 'YOUR DECK');
@@ -479,26 +548,34 @@ function playSelected(targetId = ui.target) {
   const uid = ui.selectedCard;
   act(p => E.playCard(p, uid, targetId === 'player' ? null : targetId), 'card', () => { ui.selectedCard = null; ui.target = null; });
 }
-// Pointer events support mouse, pen and touch. Horizontal touch swipes remain
-// available to scroll the hand; a vertical drag carries the card to a target.
+// Pointer events support mouse, pen and touch. The first movement decides what the
+// gesture is for: a horizontal swipe scrolls the hand (native behaviour, we let go of
+// it immediately), a vertical drag carries the card to a target.
 let drag = null, suppressCardClick = false;
 function clearDrag() {
   drag?.ghost?.remove();
   document.querySelectorAll('.drag-over, .drag-source').forEach(el => el.classList.remove('drag-over', 'drag-source'));
 }
+function releaseCapture(state, pointerId) {
+  try { if (state.card.hasPointerCapture?.(pointerId)) state.card.releasePointerCapture(pointerId); } catch { /* Pointer already gone. */ }
+}
 document.addEventListener('pointerdown', event => {
   const card = event.target.closest('.hand-cards [data-action="select-card"]');
   if (!card || card.disabled || ui.modal || event.button !== 0 || profile.run?.battle?.inspect) return;
-  drag = { id: event.pointerId, x: event.clientX, y: event.clientY, card, uid: card.dataset.uid, started: false, ghost: null };
-  card.setPointerCapture(event.pointerId);
+  // No pointer capture yet: capturing at pointerdown would swallow the horizontal
+  // swipe before the browser ever gets a chance to scroll the hand.
+  drag = { id: event.pointerId, type: event.pointerType || 'mouse', x: event.clientX, y: event.clientY, card, uid: card.dataset.uid, mode: null, ghost: null };
 });
 document.addEventListener('pointermove', event => {
   if (!drag || event.pointerId !== drag.id) return;
   const dx = event.clientX - drag.x, dy = event.clientY - drag.y;
-  if (!drag.started && Math.hypot(dx, dy) < 10) return;
-  if (!drag.started) {
+  if (!drag.mode) {
+    const intent = gestureIntent(dx, dy, { pointerType: drag.type });
+    if (!intent) return;
+    if (intent === 'scroll') { drag = null; return; }
+    drag.mode = 'drag';
+    try { drag.card.setPointerCapture(event.pointerId); } catch { /* Capture is a nicety, not a requirement. */ }
     const rect = drag.card.getBoundingClientRect();
-    drag.started = true;
     drag.ghost = drag.card.cloneNode(true);
     drag.ghost.classList.remove('selected');
     drag.ghost.classList.add('drag-ghost');
@@ -518,7 +595,8 @@ function finishDrag(event, cancelled = false) {
   if (!drag || event.pointerId !== drag.id) return;
   const state = drag;
   drag = null;
-  if (!state.started) return;
+  releaseCapture(state, event.pointerId);
+  if (state.mode !== 'drag') return;
   suppressCardClick = true;
   setTimeout(() => { suppressCardClick = false; }, 0);
   const card = profile.run?.battle?.hand.find(c => c.uid === state.uid);
